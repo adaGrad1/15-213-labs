@@ -1,13 +1,23 @@
 /*
- * mm-naive.c - The fastest, least memory-efficient malloc package.
- * 
- * In this naive approach, a block is allocated by simply incrementing
- * the brk pointer.  A block is pure payload. There are no headers or
- * footers.  Blocks are never coalesced or reused. Realloc is
- * implemented directly using mm_malloc and mm_free.
- *
- * NOTE TO STUDENTS: Replace this header comment with your own header
- * comment that gives a high level description of your solution.
+malloc implemented via a best-fit single free-block linked-list solution.
+I implemented a free-block linked-list solution as I expected it would easily extend to a segregated lists solution
+but that ended up not being necessary
+I expect you could probably improve performance by reducing the free block sizes by having them only contain their length at the top and bottom
+
+block structure
+
+Filled blocks --
+at header: 8-bytes which, if rounded down to the nearest 8, represent the block length as unsigned long.
+least significant two bits represent (IS PREV BLOCK FREE) and (IS THIS BLOCK FREE) respectively
+Min size: 24 bytes incl header (so a filled block can be converted directly into a free block when freed)
+
+Unfilled blocks --
+at header: 
+8 byte pointer to next free block with same flags as filled block header
+8 byte pointer to prev free block
+8 byte unsigned long length
+at footer:
+8 byte unsigned long length (can be same as header, allowing unfilled block to take only 24 bytes)
  */
 
 
@@ -20,17 +30,13 @@
 #include "mm.h"
 #include "memlib.h"
 
-/*********************************************************
- * NOTE TO STUDENTS: Before you do anything else, please
- * provide your team information in the following struct.
- ********************************************************/
 team_t team = {
     /* Team name */
-    "ateam",
+    "adaboost",
     /* First member's full name */
-    "Harry Bovik",
+    "Ada Boost",
     /* First member's email address */
-    "bovik@cs.cmu.edu",
+    "asdf@asdf.edu",
     /* Second member's full name (leave blank if none) */
     "",
     /* Second member's email address (leave blank if none) */
@@ -46,6 +52,9 @@ team_t team = {
 
 #define SIZE_T_SIZE (ALIGN(sizeof(size_t)))
 
+#define FREELIST_START (*(header_addr))
+#define FINAL_BLOCK (*(header_addr+1))
+
 
 
 /* 
@@ -59,8 +68,8 @@ int mm_init(void)
     header_addr = mem_heap_lo();
     freeblock_t* fb = ((void*) header_addr) + 16;
 
-    *header_addr = (void*) fb;
-    *(header_addr + 1) = (void*) fb;
+    FREELIST_START = (void*) fb;
+    FINAL_BLOCK = (void*) fb;
     init_free_block(fb, NULL, NULL, 24, 0);
 
     return -1*(header_addr == NULL);
@@ -124,12 +133,12 @@ void* merge_block_flags(void* ptr, void* flag_ptr){
 
 //will modify this once we make segregated lists
 void add_free_to_list(freeblock_t* block_addr){
-    block_addr->next_block = merge_block_flags(*header_addr, block_addr->next_block);
-    freeblock_t* next = *header_addr;
-    *header_addr = block_addr;
+    block_addr->next_block = merge_block_flags(FREELIST_START, block_addr->next_block);
+    freeblock_t* next = FREELIST_START;
+    FREELIST_START = block_addr;
     block_addr->prev_block = NULL;
     if(next != NULL)
-        next->prev_block = merge_block_flags(*header_addr, next->prev_block);
+        next->prev_block = merge_block_flags(FREELIST_START, next->prev_block);
 }
 
 void remove_block_from_list(freeblock_t* block){
@@ -140,8 +149,8 @@ void remove_block_from_list(freeblock_t* block){
         next->prev_block = merge_block_flags(prev, next->prev_block);
     if(prev != NULL)
         prev->next_block = merge_block_flags(next, prev->next_block);
-    if(*header_addr == block)
-        *header_addr = next; //if top of list, we properly maintain the start of the list
+    if(FREELIST_START == block)
+        FREELIST_START = next; //if top of list, we properly maintain the start of the list
 }
 
 //mallocs at a particular free block
@@ -170,8 +179,8 @@ void* malloc_block(freeblock_t* block_addr, size_t size)
     //init new free block after allocated block, stick it at the start of the list
     void* next_block_addr = ((void*) block_addr) + aligned_size;
     if(!dont_split){
-        if(*(header_addr + 1) == block_addr)
-            *(header_addr + 1) = next_block_addr; // if splitting affected the final block, reflect that
+        if(FINAL_BLOCK == block_addr)
+            FINAL_BLOCK = next_block_addr; // if splitting affected the final block, reflect that
         init_free_block(next_block_addr, NULL, NULL, old_len-aligned_size, 0);
         mark_free(next_block_addr, 1);
         add_free_to_list(next_block_addr);
@@ -204,14 +213,14 @@ freeblock_t* coalesce(freeblock_t* block)
     unsigned long new_block_len = block->length + prev_len + next_len;
     char prev_free = prev_len > 0 ? is_prev_free(prev_block) : is_prev_free(block);
     init_free_block(new_block_start, NULL, NULL, new_block_len, prev_free); // if we are coalescing properly, then after a coalesce, the prev_free should always be false
-    ((freeblock_t*)new_block_start)->next_block = merge_block_flags(*(header_addr), ((freeblock_t*)new_block_start)->next_block);
+    ((freeblock_t*)new_block_start)->next_block = merge_block_flags(FREELIST_START, ((freeblock_t*)new_block_start)->next_block);
     if(*(header_addr) != NULL)
-        ((freeblock_t*) (*header_addr))->prev_block = merge_block_flags(new_block_start, ((freeblock_t*) (*header_addr))->prev_block);
-    *(header_addr) = new_block_start;
+        ((freeblock_t*) FREELIST_START)->prev_block = merge_block_flags(new_block_start, ((freeblock_t*) FREELIST_START)->prev_block);
+    FREELIST_START = new_block_start;
     
     //if the one that previously came after this block was the ending block or this block was the ending block, then make this block the ending block
-    if(*(header_addr+1) < new_block_start + new_block_len){
-        *(header_addr + 1) = new_block_start;
+    if(FINAL_BLOCK < new_block_start + new_block_len){
+        FINAL_BLOCK = new_block_start;
     }
     //return void because we don't have to use this right away
     assert(is_free(new_block_start));
@@ -224,7 +233,7 @@ freeblock_t* coalesce(freeblock_t* block)
 //TODO init a free block at the end of the range, coalesce it
 void* extend_malloc_area(size_t size)
 {
-    freeblock_t* final_block_header = *(header_addr + 1);
+    freeblock_t* final_block_header = FINAL_BLOCK;
     unsigned long block_size;
     if(is_free(final_block_header))
         block_size = MAX(MIN_ALLOC_SIZE, ALIGN(size - final_block_header->length));
@@ -253,7 +262,7 @@ void* extend_malloc_area(size_t size)
 void *mm_malloc(size_t size)
 {
     size_t aligned_size = MAX(ALIGN(size)+8, 24); //add 8 to account for header space cost. also must be at least 24 in order to work nicely when we free it later
-    freeblock_t* cur_addr = *(header_addr);
+    freeblock_t* cur_addr = FREELIST_START;
     void* to_ret = NULL;
     void* best_block = NULL;
     unsigned long best_size = 1 << 31;
@@ -334,7 +343,7 @@ void *mm_realloc(void *ptr, size_t size)
     {
         freeblock_t* next_block_addr = ptr + prev_len;
         //if we're at the end, just resize
-        if(*(header_addr+1) == ptr)
+        if(FINAL_BLOCK == ptr)
         {
             if(mem_sbrk(new_len - prev_len) == (void*)-1)
                 return NULL;
@@ -351,7 +360,7 @@ void *mm_realloc(void *ptr, size_t size)
                     new_len = new_len + leftover_space;
                 *cur_ptr_long = ((*cur_ptr_long) & 0x7) | (new_len & ~(0x7));
                 return ptr + 0x8;
-            } else if(*(header_addr+1) == next_block_addr){
+            } else if(FINAL_BLOCK == next_block_addr){
                 freeblock_t* new_free_block = coalesce(extend_malloc_area(new_len - prev_len));
                 remove_block_from_list(new_free_block);
                 *cur_ptr_long = ((*cur_ptr_long) & 0x7) | ((prev_len + new_free_block->length) & ~(0x7));
@@ -370,7 +379,7 @@ void *mm_realloc(void *ptr, size_t size)
 
 
 void mm_checkheap(){
-    return;
+    return; // delete return to enable thorough heap checking!
     //go from top to bottom in memory until we pass mem_heap_hi
     //count free blocks, make sure is_free always is the same as next block's is_prev_free
     //make sure we're always block-aligned
@@ -392,13 +401,13 @@ void mm_checkheap(){
             assert(len1 == len2); //check that free blocks have proper length suffixes
             cur_ptr = cur_ptr + len1;
         } else{
-            cur_ptr = cur_ptr + ((*((unsigned long*) cur_ptr)) & (~0x3));
+            cur_ptr = cur_ptr + (*((unsigned long*) cur_ptr) & ~0x3);
         }
     }
     //go in linked list order in memory for free blocks -- make sure the linked list contains as many as the top-down traversal
     //and make sure next->prev is always equal to self
     int free_blocks_ct_2 = 0;
-    freeblock_t* cur_list_elem = *((freeblock_t**) header_addr);
+    freeblock_t* cur_list_elem = *((freeblock_t*) FREELIST_START);
     while(cur_list_elem != NULL){
         free_blocks_ct_2++;
         if(wipe_flags(cur_list_elem->next_block) != NULL){
